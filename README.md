@@ -19,6 +19,12 @@ chmod u+x m17-hotspot-installer.sh
 sudo ./m17-hotspot-installer.sh
 ```
 
+Options: `-n` skips flashing the modem firmware; `-q` installs the QTC messaging node without asking.
+
+### QTC messaging (experimental)
+
+Near the end, the installer offers to install [QTC](https://github.com/jancona/qtc), a store-and-forward text messaging node for M17, currently in an invite-only test. It installs the `qtcd` package, configures it with your callsign and your gateway's current reflector, and adds `M17-QTC 127.0.0.1 17000` to `OverrideHosts.txt`. Your gateway is not changed: to use QTC, choose reflector `M17-QTC`, module `A` in 'Gateway Config'. Voice still reaches your previous reflector; SMS goes into QTC. Messages are not private and callsigns are not verified.
+
 ## Features
 
 - Verifies root and OS requirements
