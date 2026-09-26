@@ -26,6 +26,7 @@ M17_USER="m17"
 NGINX_DEFAULT="/etc/nginx/sites-enabled/default"
 CMDLINE_FILE="/boot/firmware/cmdline.txt"
 HOSTFILE_URL="https://m17-project.github.io/hostfiles/M17Hosts.txt"
+QTC_RELEASES_URL="https://api.github.com/repos/jancona/qtc/releases"
 OVERLAYS_DIR="/boot/firmware/overlays"
 I2S_OVERLAY_URL="https://github.com/M17-Project/RaspberryPi_I2S_Slave/raw/master/genericstereoaudiocodec.dtbo"
 # ------------------------------------------------
@@ -86,8 +87,62 @@ flash_firmware() {
     stm32flash -v -R -i "-532&-533&532,533,:-532,-533,533" -w "$M17_HOME/${firmware[$HW]}" /dev/ttyAMA0
 }
 
+# dpkg_install installs a .deb, retrying past intermittent dpkg frontend
+# lock errors.
+dpkg_install() {
+    local max_attempts=5
+    local attempt=1
+    while [ $attempt -le $max_attempts ]; do
+        echo "Attempt $attempt of $max_attempts..."
+        if dpkg -i "$1"; then
+            return 0
+        fi
+        if [ $attempt -lt $max_attempts ]; then
+            echo "Failed, retrying in 2 seconds..."
+            sleep 2
+        fi
+        ((attempt++))
+    done
+    echo "Failed after $max_attempts attempts"
+    return 1
+}
+
+# install_qtc installs the QTC messaging node (qtcd) next to the gateway and
+# makes the M17-QTC reflector name resolve to it. The gateway itself is not
+# repointed; that is a choice in the dashboard.
+install_qtc() {
+    local arch url call override
+    arch=$(dpkg --print-architecture)
+    echo "📥 Downloading and installing qtcd ($arch)..."
+    # The newest release, prereleases included (the test phase ships those).
+    url=$(curl -s "$QTC_RELEASES_URL" | jq -r --arg suffix "_${arch}.deb" \
+        '[.[].assets[].browser_download_url | select(endswith($suffix))][0] // empty')
+    if [ -z "$url" ]; then
+        echo "❌ No qtcd package for $arch found; skipping QTC."
+        return 0
+    fi
+    curl -L -o /tmp/qtcd.deb "$url"
+
+    call=$(awk -F= '$1 ~ /^[ \t]*Callsign[ \t]*$/ { gsub(/^[ \t]+|[ \t\r]+$/, "", $2); print $2; exit }' /etc/m17-gateway.ini)
+    if [ -z "$call" ] || [ "$call" = "CALLSIGN_PLACEHOLDER" ]; then
+        read -rp "Enter your callsign for the QTC node (e.g. N1ADJ): " call
+    fi
+    if ! QTCD_CALLSIGN="$call" dpkg_install /tmp/qtcd.deb; then
+        echo "❌ qtcd install failed; continuing without QTC."
+        return 0
+    fi
+
+    override=/opt/m17/rpi-dashboard/files/OverrideHosts.txt
+    if ! grep -q '^M17-QTC[[:space:]]' "$override"; then
+        echo "M17-QTC 127.0.0.1 17000" >> "$override"
+        echo "Added M17-QTC to $override"
+    fi
+}
+
 usage() {
-    echo "Usage: sudo $0 [-n]"
+    echo "Usage: sudo $0 [-n] [-q]"
+    echo "  -n  don't flash modem firmware"
+    echo "  -q  install the QTC messaging node (experimental) without asking"
 }
 
 # Must be run as root
@@ -103,10 +158,11 @@ if ! grep -q "trixie\|bookworm" /etc/os-release; then
     exit 1
 fi
 
-# Check for -n (don't flash) option
-while getopts "n" opt; do
+# Check for -n (don't flash) and -q (install QTC) options
+while getopts "nq" opt; do
     case $opt in
         n) flash='n' ;;
+        q) qtc='y' ;;
         *) usage; exit 1 ;;
     esac
 done
@@ -329,31 +385,7 @@ fi
 echo "📥 Downloading and installing m17-gateway..."
 curl -s https://api.github.com/repos/jancona/m17/releases/latest | jq -r '.assets[].browser_download_url | select(. | contains("_arm64.deb") and contains("m17-gateway"))' | xargs -I {} curl -L -o /tmp/m17-gateway.deb {}
 
-# Avoid intermittent dpkg frontend lock errors
-max_attempts=5
-attempt=1
-success=false
-
-while [ $attempt -le $max_attempts ]; do
-    echo "Attempt $attempt of $max_attempts..."
-
-    if dpkg -i /tmp/m17-gateway.deb; then
-        success=true
-        break
-    fi
-
-    if [ $attempt -lt $max_attempts ]; then
-        echo "Failed, retrying in 2 seconds..."
-        sleep 2
-    fi
-
-    ((attempt++))
-done
-
-if [ "$success" = false ]; then
-    echo "Failed after $max_attempts attempts"
-    exit 1
-fi
+dpkg_install /tmp/m17-gateway.deb || exit 1
 
 echo "👥 Adding 'www-data' to 'm17-gateway-control' group..."
 usermod -aG m17-gateway-control www-data
@@ -410,6 +442,17 @@ if ! grep -q "'admin_password_hash' => '[^']" /opt/m17/rpi-dashboard/config.php 
     fi
 fi
 
+# Optionally install the QTC messaging node
+if [ "$qtc" != "y" ]; then
+    read -rp "💬 Install the QTC messaging node (experimental, invite-only test)? (y/N): " QTC_CONFIRM
+    if [[ "$QTC_CONFIRM" == "Y" || "$QTC_CONFIRM" == "y" ]]; then
+        qtc='y'
+    fi
+fi
+if [ "$qtc" = "y" ]; then
+    install_qtc
+fi
+
 # Restart m17-gateway if we stopped it
 if [ "$restart" = true ]; then
     echo "Restarting m17-gateway service"
@@ -425,4 +468,9 @@ echo -e "\n* To access the dashboard go to: http://$IP_ADDRESS/ or http://$(host
 echo -e "  There, to configure your node (call sign, frequency etc), click on 'Gateway Config'."
 echo -e "\n* If you have an SX1255 or MMDVM HAT, you must make configuration changes before it will work!"
 echo -e "  See the README for details: https://github.com/M17-Project/m17-hotspot-installer/tree/main#sx1255-configuration"
+if [ "$qtc" = "y" ]; then
+    echo -e "\n* QTC messaging: in 'Gateway Config', set the reflector to M17-QTC, module A."
+    echo -e "  Voice still reaches the reflector you had before; SMS goes into QTC."
+    echo -e "  Node status: curl -s localhost:8017/status   Logs: journalctl -u qtcd -f"
+fi
 echo -e "\nYou will find further information under 'Help' in the dashboard."
