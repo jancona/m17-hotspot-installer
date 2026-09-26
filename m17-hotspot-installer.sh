@@ -139,6 +139,22 @@ install_qtc() {
     fi
 }
 
+# qtc_upstream prints the reflector and module that voice on the node's
+# module A goes to, from /etc/qtcd.ini (or an rc1 /etc/qtcd.json).
+qtc_upstream() {
+    if [ -f /etc/qtcd.ini ]; then
+        awk '
+            { line = $0; gsub(/^[ \t]+|[ \t\r]+$/, "", line) }
+            line ~ /^\[/ { in_a = (tolower(line) == "[module a]"); next }
+            in_a && tolower(line) ~ /^reflector[ \t]*=/ { sub(/^[^=]*=[ \t]*/, "", line); r = line }
+            in_a && tolower(line) ~ /^module[ \t]*=/ { sub(/^[^=]*=[ \t]*/, "", line); m = line }
+            END { if (r != "") print r " module " m }
+        ' /etc/qtcd.ini
+    elif [ -f /etc/qtcd.json ]; then
+        jq -r '.inet.modules.A | select(.) | "\(.reflector) module \(.module)"' /etc/qtcd.json
+    fi
+}
+
 usage() {
     echo "Usage: sudo $0 [-n] [-q]"
     echo "  -n  don't flash modem firmware"
@@ -435,8 +451,9 @@ echo -e "  There, to configure your node (call sign, frequency etc), click on 'G
 echo -e "\n* If you have an SX1255 or MMDVM HAT, you must make configuration changes before it will work!"
 echo -e "  See the README for details: https://github.com/M17-Project/m17-hotspot-installer/tree/main#sx1255-configuration"
 if [ "$qtc" = "y" ]; then
+    upstream=$(qtc_upstream)
     echo -e "\n* QTC messaging: in 'Gateway Config', set the reflector to M17-QTC, module A."
-    echo -e "  Voice still reaches the reflector you had before; SMS goes into QTC."
+    echo -e "  Voice then still goes to ${upstream:-the reflector your gateway used before}; SMS goes into QTC."
     echo -e "  Node status: curl -s localhost:8017/status   Logs: journalctl -u qtcd -f"
 fi
 echo -e "\nYou will find further information under 'Help' in the dashboard."
