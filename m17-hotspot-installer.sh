@@ -250,7 +250,8 @@ set -e
 if [ "$HAT_TYPE" != "SX1255" ]; then
     case $flash in
         n) ;;
-        *) read -rp "💾 Do you want to flash the latest firmware to the HAT? (Y/n): " FLASH_CONFIRM
+        *) # Pressing Enter skips flashing, so the default shown is N.
+            read -rp "💾 Do you want to flash the latest firmware to the HAT? (y/N): " FLASH_CONFIRM
             if [[ "$FLASH_CONFIRM" == "Y" || "$FLASH_CONFIRM" == "y" ]]; then
                 flash_firmware
             fi
